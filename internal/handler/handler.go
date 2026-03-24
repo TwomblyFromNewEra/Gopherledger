@@ -1,0 +1,135 @@
+// Пакет handler содержит HTTP-обработчики.
+//
+// Взаимодействие с бизнес-логикой осуществляется через интерфейс.
+// Определите этот интерфейс здесь, по месту использования.
+// Реализуйте все обработчики самостоятельно.
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"net/http"
+)
+
+// Handler хранит зависимость от бизнес-логики.
+// Замените interface{} на свой интерфейс.
+type Handler struct {
+	svc interface{}
+}
+
+// New создаёт Handler.
+func New(svc interface{}) *Handler {
+	return &Handler{svc: svc}
+}
+
+// ---------------------------------------------------------------------------
+// Вспомогательные функции для ответов - предоставлены
+// ---------------------------------------------------------------------------
+
+// writeError записывает JSON-ответ с ошибкой.
+// Клиент видит только userMsg. Внутренние детали пишутся только в лог.
+// Прочитайте ТЗ и создайте структуру тела ответа самостоятельно.
+func writeError(w http.ResponseWriter, status int, code, userMsg string, internalErr error) {
+	if internalErr != nil {
+		log.Printf("ошибка code=%s status=%d: %v", code, status, internalErr)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	// TODO: создайте структуру ответа и сериализуйте её
+	_ = json.NewEncoder(w)
+}
+
+// writeJSON записывает успешный JSON-ответ.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("writeJSON: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Обработчики - реализуйте самостоятельно
+// ---------------------------------------------------------------------------
+
+// Register обрабатывает POST /api/user/register.
+// При успехе: 200 OK, заголовок Authorization с токеном.
+// При дублировании логина: 409 Conflict.
+// При некорректных данных: 400 Bad Request.
+func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
+	panic("не реализовано")
+}
+
+// Login обрабатывает POST /api/user/login.
+// При успехе: 200 OK, заголовок Authorization с токеном.
+// При неверных данных: 401 Unauthorized.
+func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
+	panic("не реализовано")
+}
+
+// CreateOrder обрабатывает POST /api/user/orders.
+// Тело запроса: номер заказа в виде обычного текста.
+// 202 Accepted  - новый заказ принят в обработку.
+// 200 OK        - заказ уже загружен этим пользователем.
+// 409 Conflict  - заказ принадлежит другому пользователю.
+// 422 Unprocessable Entity - номер не прошёл проверку Луна.
+func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
+	panic("не реализовано")
+}
+
+// GetOrders обрабатывает GET /api/user/orders.
+// 200 OK с JSON-массивом заказов или 204 No Content если заказов нет.
+func (h *Handler) GetOrders(w http.ResponseWriter, r *http.Request) {
+	panic("не реализовано")
+}
+
+// GetBalance обрабатывает GET /api/user/balance.
+func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
+	panic("не реализовано")
+}
+
+// Withdraw обрабатывает POST /api/user/balance/withdraw.
+// 200 OK при успехе.
+// 402 Payment Required при нехватке баллов.
+// 422 Unprocessable Entity при неверном номере заказа.
+func (h *Handler) Withdraw(w http.ResponseWriter, r *http.Request) {
+	panic("не реализовано")
+}
+
+// GetWithdrawals обрабатывает GET /api/user/withdrawals.
+// 200 OK с массивом или 204 No Content если списаний нет.
+func (h *Handler) GetWithdrawals(w http.ResponseWriter, r *http.Request) {
+	panic("не реализовано")
+}
+
+// ExportStats обрабатывает POST /api/stats/export.
+// Собирает статистику системы и записывает её в текстовый файл stats.txt
+// в корне проекта. Возвращает 200 OK при успехе.
+//
+// Файл должен содержать:
+//   - общее число зарегистрированных пользователей
+//   - общее число заказов и их распределение по статусам
+//   - суммарное количество начисленных баллов
+//   - суммарное количество списанных баллов
+//   - время генерации отчёта
+//
+// Для работы с файлами используйте пакет os (неделя 8).
+func (h *Handler) ExportStats(w http.ResponseWriter, r *http.Request) {
+	panic("не реализовано")
+}
+
+// ---------------------------------------------------------------------------
+// Вспомогательная функция для работы с контекстом - предоставлена
+// ---------------------------------------------------------------------------
+
+type contextKey string
+
+const CtxKeyUserID contextKey = "userID"
+
+// UserIDFromContext извлекает ID аутентифицированного пользователя из контекста.
+// Возвращает 0, false если значение отсутствует.
+func UserIDFromContext(ctx context.Context) (int64, bool) {
+	// реализуйте самостоятельно
+	panic("не реализовано")
+}

@@ -1,93 +1,275 @@
-# GopherLedger Task
+# Gopherledger
+
+Gopherledger - это бэкенд системы лояльности для интернет-магазина.
+Пользователи регистрируются, загружают номера своих заказов и автоматически
+получают бонусные баллы. Накопленные баллы можно тратить при оформлении новых заказов.
+
+> **Важно:** используйте стандартную библиотеку Go максимально.
+> Про каждую подключённую стороннюю библиотеку мы спросим на зачёте дополнительно  - вы должны
+> понимать, зачем она нужна и чем отличается от стандартного решения.
+
+> **Структура проекта фиксирована.** Вы можете добавлять новые файлы и пакеты,
+> но удалять или переименовывать существующие нельзя - они все нужны.
+
+---
 
 
+### Критерии оценки
 
-## Getting started
+Для того, чтобы проект был проверен, необходимо преодолеть два блокера. Если хотя бы один из блокеров не пройден, то за проект выставляется 0 баллов без проверки кодовой базы. Блокеры:
+- проект должен успешно компилироваться: команды go build ./cmd/server/ и go test ./... завершаются без ошибок компиляции. Если проект не компилируется, то студент получает 0 баллов. Этот блокер необходим для того, чтобы проверяющие понимали, что студент не просто написал что-то, но и проверил свой собственный код;
+- если проект не проходит хотя бы один из шагов базового сценария, то студент получает 0 баллов. Этот блокер необходим для того, чтобы студент выполнил минимально возможную рабочую конфигурацию проекта. Базовый сценарий реализуется через HTTP-хендлеры: POST /api/user/register (регистрация) -> POST /api/user/login (логин) -> POST /api/user/orders (загрузка заказа) -> GET /api/user/balance (просмотр баланса).
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+Разбиение проекта по баллам:
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+1. Хранилище данных (1.5 балла)
+- Все методы реализованы корректно, используют предоставленные map, возвращают правильные sentinel-ошибки - 0.5 баллов
+- Конкурентный доступ защищен, блокировки в каждом публичном методе - 0.5 баллов
+- Withdraw атомарен: проверка и списание под одной блокировкой - 0.5 баллов
 
-## Add your files
+2. Бизнес-логика (1.5 балла)
+- Определен интерфейс хранилища с нужными методами, interface{} заменен - 0.25 баллов
+- validateLuhn реализован корректно - 0.25 баллов
+- RegisterUser хеширует через crypto/sha256, LoginUser проверяет хеш - 0.5 баллов
+- Остальные методы делегируют в store, Luhn проверяется при создании и списании - 0.5 баллов
 
-* [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+3. Воркер начислений (1 балл)
+- processAllPendingOrders и processOrder реализованы: получение заказов, параллельный запуск с ограничением (errgroup/WaitGroup), смена статусов, начисление/отклонение с задержкой - 0.5 баллов
+- processingOrders защищен от конкурентного доступа, заказы не обрабатываются повторно, пометка снимается при завершении - 0.5 баллов
+
+4. Конфигурация и аутентификация (1 балл)
+- Config: структура с yaml-тегами, чтение файла, значения по умолчанию - 0.5 баллов
+- Auth: генерация уникального токена, валидация, потокобезопасное хранение - 0.5 баллов
+
+5. HTTP-слой (3 балла)
+- Все 8 обработчиков реализованы с корректными HTTP-кодами по ТЗ, writeError дописан (структура ошибки сериализуется). UserIDFromContext реализован - 1 балл
+- Auth middleware: токен из заголовка, валидация через пакет auth, userID в context через CtxKeyUserID - 0.5 баллов
+- Logging с использованием statusRecorder - 0.5 баллов
+- Recover middleware: обработка и логирование паники, ответ 500 - 0.5 баллов
+- Router собирает все маршруты + main с graceful shutdown - 0.5 баллов
+
+6. Тестирование (2 балла)
+- fakeStore реализует интерфейс из service, тесты покрывают основные сценарии - 0.5 баллов
+- fakeService реализует интерфейс из handler, тесты через httptest покрывают основные сценарии - 0.5 баллов
+- Тесты табличные, все проходят (go test ./...) - 0.5 баллов
+- Тестовое покрытие ≥ 40% по go test -cover ./... - 0.5 баллов
+
+---
+
+## Как работает система
+
+### Жизненный цикл заказа
+
+Когда пользователь загружает номер заказа, он проходит следующие статусы:
 
 ```
-cd existing_repo
-git remote add origin https://git.culab.ru/courses/go-development-fundamentals/gopherledger/gopherledger-task.git
-git branch -M main
-git push -uf origin main
+NEW -> PROCESSING -> PROCESSED
+                  -> INVALID
 ```
 
-## Integrate with your tools
+- **NEW** - заказ только что загружен, ожидает обработки
+- **PROCESSING** - воркер взял заказ в работу
+- **PROCESSED** - заказ успешно обработан, баллы начислены
+- **INVALID** - заказ не прошёл проверку (примерно 10% заказов)
 
-* [Set up project integrations](https://git.culab.ru/courses/go-development-fundamentals/gopherledger/gopherledger-task/-/settings/integrations)
+### Воркер начислений
 
-## Collaborate with your team
+При старте сервера запускается фоновый воркер. Каждые несколько секунд он:
+1. Берёт все заказы в статусе NEW и PROCESSING
+2. Для каждого заказа запускает отдельную горутину
+3. Горутина имитирует обработку (случайная задержка от 2 до 6 секунд)
+4. С вероятностью 10% заказ получает статус INVALID без начисления баллов
+5. В остальных случаях заказ получает статус PROCESSED и случайное начисление от 10 до 500 баллов
+6. При статусе PROCESSED баланс пользователя пополняется на сумму начисления
 
-* [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+Воркер не запускает повторную обработку заказа, если горутина для него уже работает.
 
-## Test and Deploy
+### Баланс и списания
 
-Use the built-in continuous integration in GitLab.
+Пользователь видит два числа:
+- **current** - текущий доступный баланс в баллах
+- **withdrawn** - суммарно списанные баллы за всё время
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+При списании баллов нужно указать номер заказа, в счёт которого происходит списание.
+Номер проходит ту же проверку алгоритмом Луна (https://ru.ruwiki.ru/wiki/%D0%90%D0%BB%D0%B3%D0%BE%D1%80%D0%B8%D1%82%D0%BC_%D0%9B%D1%83%D0%BD%D0%B0), что и при загрузке.
 
-***
+---
 
-# Editing this README
+## Конфигурация
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+Параметры читаются из файла `config.yaml`. Если файл не найден, используются значения по умолчанию.
 
-## Suggestions for a good README
+```yaml
+server_host: "localhost"
+server_port: 8080
+log_level: "info"
+accrual_interval_seconds: 3
+worker_concurrency: 5
+```
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+`log_level` используется в middleware логирования: при уровне `debug` логируйте
+дополнительные детали запроса, при `info` - только метод, путь, статус и время.
 
-## Name
-Choose a self-explaining name for your project.
+---
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+## Запуск
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+```bash
+go run ./cmd/server/
+```
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+---
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+## API
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+Защищённые маршруты требуют заголовок `Authorization` с токеном, полученным при регистрации или входе.
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+| Метод | Путь | Авторизация | Описание |
+|-------|------|-------------|----------|
+| POST | `/api/user/register` | Нет | Регистрация |
+| POST | `/api/user/login` | Нет | Вход |
+| POST | `/api/user/orders` | Да | Загрузить номер заказа |
+| GET | `/api/user/orders` | Да | Список заказов |
+| GET | `/api/user/balance` | Да | Текущий баланс |
+| POST | `/api/user/balance/withdraw` | Да | Списать баллы |
+| GET | `/api/user/withdrawals` | Да | История списаний |
+| POST | `/api/stats/export` | Да | Экспорт статистики в файл |
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+### Регистрация и вход
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+Запрос:
+```json
+{"login": "alice", "password": "secret"}
+```
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+При успехе сервер возвращает токен в заголовке ответа:
+```
+Authorization: <токен>
+```
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+Этот токен клиент передаёт в заголовке всех последующих запросов.
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+### Загрузка заказа
 
-## License
-For open source projects, say how it is licensed.
+Тело запроса - номер заказа в виде обычного текста:
+```
+79927398713
+```
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Номер проверяется по алгоритму Луна. Коды ответа:
+- `202` - заказ принят в обработку
+- `200` - заказ уже загружен этим пользователем ранее
+- `409` - заказ принадлежит другому пользователю
+- `422` - номер не прошёл проверку Луна
+
+### Список заказов
+
+```json
+[
+  {
+    "number": "79927398713",
+    "status": "PROCESSED",
+    "accrual": 150.5,
+    "uploaded_at": "2024-01-15T10:00:00Z"
+  }
+]
+```
+
+Поле `accrual` присутствует только у заказов в статусе PROCESSED.
+При пустом списке возвращается `204 No Content`.
+
+### Баланс
+
+```json
+{"current": 300.5, "withdrawn": 100.0}
+```
+
+### Списание баллов
+
+```json
+{"order": "79927398713", "sum": 100.0}
+```
+
+Коды ответа:
+- `200` - успешно
+- `402` - недостаточно баллов
+- `422` - неверный номер заказа
+
+### История списаний
+
+```json
+[
+  {
+    "order": "79927398713",
+    "sum": 100.0,
+    "processed_at": "2024-01-15T11:00:00Z"
+  }
+]
+```
+
+При пустой истории возвращается `204 No Content`.
+
+### Экспорт статистики
+
+POST `/api/stats/export` создаёт файл `stats.txt` в корне проекта.
+
+### Формат ошибок
+
+Все ошибочные ответы используют единый формат:
+```json
+{"code": "КОД_ОШИБКИ", "message": "Описание для пользователя"}
+```
+
+---
+
+## Ручное тестирование через Postman
+
+Все ручки можно тестировать вручную через Postman: https://www.postman.com
+Это удобнее, чем curl, и позволяет сохранять запросы и переиспользовать токен между ними.
+
+---
+
+## Рекомендуемый порядок реализации
+
+Двигайтесь по шагам. Каждый шаг соответствует изученным темам.
+
+### Шаг 1 - internal/store/store.go
+Хранилище в памяти на обычных map. Защитите конкурентный доступ к данным.
+Метод `Withdraw` должен быть атомарным: проверка баланса и его списание
+не должны прерываться другой горутиной.
+
+### Шаг 2 - internal/service/service.go
+Реализуйте методы бизнес-логики и методы воркера начислений.
+Определите интерфейс для хранилища здесь, по месту использования.
+Используйте инструменты синхронизации из пакета sync.
+
+### Шаг 3 - internal/config/config.go
+Загрузка конфигурации из YAML-файла. Добавьте поля в структуру `Config`
+самостоятельно, опираясь на `config.yaml`.
+
+### Шаг 4 - internal/auth/auth.go
+Генерация и проверка токенов. Токен - случайная уникальная строка, связанная
+с ID пользователя. Защитите внутреннее хранилище токенов от конкурентного доступа.
+
+### Шаг 5 - handler, middleware, router, cmd/server
+Реализуйте все HTTP-обработчики, middleware (Auth, Logging, Recover),
+маршрутизацию и точку входа с graceful shutdown.
+
+### Шаг 6 - тесты
+Табличные unit-тесты для бизнес-логики через fakeStore.
+Тесты для обработчиков через пакет `net/http/httptest`.
+
+---
+
+## Тесты
+
+```bash
+go test ./...
+go test -cover ./...
+```
+
+## Линтинг
+
+```bash
+go vet ./...
+```
