@@ -1,9 +1,15 @@
 // Пакет middleware содержит HTTP-middleware.
 // Реализуйте Auth, Logging и Recover самостоятельно.
+
 package middleware
 
 import (
+	"context"
+	"gopherledger/internal/auth"
+	"gopherledger/internal/handler"
+	"log"
 	"net/http"
+	"time"
 )
 
 // Auth проверяет токен из заголовка Authorization и помещает ID пользователя в контекст.
@@ -16,7 +22,18 @@ import (
 //   - передать управление следующему handler или вернуть 401
 func Auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// реализуйте самостоятельно
+		token := r.Header.Get("Authorization")
+		if token == "" {
+			http.Error(w, "нет токена авторизации", http.StatusUnauthorized)
+			return
+		}
+		userID, err := auth.ValidateToken(token)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		ctx := context.WithValue(r.Context(), handler.CtxKeyUserID, userID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -27,6 +44,11 @@ type statusRecorder struct {
 	status int
 }
 
+func (sr *statusRecorder) WriteHeader(status int) {
+	sr.status = status
+	sr.ResponseWriter.WriteHeader(status)
+}
+
 // Logging логирует метод, путь, статус ответа и время выполнения каждого запроса.
 //
 // Что нужно сделать:
@@ -35,7 +57,10 @@ type statusRecorder struct {
 //   - после выполнения handler записать лог
 func Logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// реализуйте самостоятельно
+		start := time.Now()
+		status := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(status, r)
+		log.Printf("%s %s %d %s", r.Method, r.URL.Path, status.status, time.Since(start))
 	})
 }
 
@@ -48,5 +73,12 @@ func Logging(next http.Handler) http.Handler {
 func Recover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// реализуйте самостоятельно
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("im panicking %v", err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
 	})
 }
