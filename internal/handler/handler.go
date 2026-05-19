@@ -354,28 +354,24 @@ func (h *Handler) GetWithdrawals(w http.ResponseWriter, r *http.Request) {
 //
 // Для работы с файлами используйте пакет os (неделя 8).
 func (h *Handler) ExportStats(w http.ResponseWriter, r *http.Request) {
-	// 1. Проверяем авторизацию и получаем ID текущего пользователя
 	userID, ok := UserIDFromContext(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Пользователь не авторизован", nil)
 		return
 	}
 
-	// 2. Получаем все заказы этого пользователя
 	orders, err := h.svc.GetUserOrders(userID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Не удалось получить заказы", err)
 		return
 	}
 
-	// 3. Получаем баланс этого пользователя (чтобы узнать списания)
 	balance, err := h.svc.GetBalance(userID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Не удалось получить баланс", err)
 		return
 	}
 
-	// 4. Считаем метрики по заказам прямо здесь, на лету
 	var accrualTotal float64
 	ordersStatus := make(map[string]int64)
 
@@ -384,13 +380,11 @@ func (h *Handler) ExportStats(w http.ResponseWriter, r *http.Request) {
 		accrualTotal += o.Accrual
 	}
 
-	// 5. Собираем красивую текстовую строку через fmt.Sprintf (без string(rune()))
-	content := "=== Личная статистика пользователя ===\n"
+	content := "=== статистика пользователя ===\n"
 	content += fmt.Sprintf("ID пользователя: %d\n", userID)
-	content += fmt.Sprintf("Заказов суммарно: %d\n", len(orders))
-	content += "Распределение по статусам:\n"
+	content += fmt.Sprintf("Заказов: %d\n", len(orders))
+	content += "Cтатусы:\n"
 
-	// Если заказов нет, мапа будет пустой, обработаем красиво
 	if len(orders) == 0 {
 		content += "  - Нет загруженных заказов\n"
 	} else {
@@ -399,19 +393,16 @@ func (h *Handler) ExportStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	content += fmt.Sprintf("Начислено баллов суммарно: %.2f\n", accrualTotal)
-	content += fmt.Sprintf("Списано баллов суммарно: %.2f\n", balance.Withdrawn)
-	content += fmt.Sprintf("Текущий баланс: %.2f\n", balance.Current)
+	content += fmt.Sprintf("Начислено баллов: %.2f\n", accrualTotal)
+	content += fmt.Sprintf("Списано баллов: %.2f\n", balance.Withdrawn)
+	content += fmt.Sprintf("Баланс: %.2f\n", balance.Current)
 	content += fmt.Sprintf("Время генерации отчета: %s\n", time.Now().Format(time.RFC3339))
 
-	// 6. Записываем файл stats.txt в корень проекта
-	err = os.WriteFile("stats.txt", []byte(content), 0666)
-	if err != nil {
+	if err := os.WriteFile("stats.txt", []byte(content), 0666); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Не удалось записать файл", err)
 		return
 	}
 
-	// 7. Возвращаем чистый 200 OK без тела, как просит ТЗ
 	w.WriteHeader(http.StatusOK)
 }
 

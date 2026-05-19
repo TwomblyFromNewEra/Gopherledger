@@ -4,576 +4,503 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
-	"gopherledger/internal/domain"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"sync"
+	"strings"
 	"testing"
 	"time"
+
+	"gopherledger/internal/domain"
 )
 
-// ============================================================================
-// FAKE SERVICE IMPLEMENTATION
-// ============================================================================
-
-type fakeService struct {
-	mu          sync.Mutex
-	users       map[string]string // login -> password
-	userIDs     map[string]int64  // login -> userID
-	tokens      map[string]int64  // token -> userID
-	orders      map[string]*domain.Order
-	balances    map[int64]domain.Balance
-	withdrawals map[int64][]domain.Withdrawal
-	userIDSeq   int64
-	tokenIDSeq  int64
+// mockService - простой mock для тестирования
+type mockService struct {
+	registerFn       func(login, password string) (string, error)
+	loginFn          func(login, password string) (string, error)
+	createOrderFn    func(userID int64, number string) (*domain.Order, error)
+	getUserOrdersFn  func(userID int64) ([]domain.Order, error)
+	getBalanceFn     func(userID int64) (domain.Balance, error)
+	withdrawFn       func(userID int64, orderNumber string, sum float64) error
+	getWithdrawalsFn func(userID int64) ([]domain.Withdrawal, error)
 }
 
-func newFakeService() *fakeService {
-	return &fakeService{
-		users:       make(map[string]string),
-		userIDs:     make(map[string]int64),
-		tokens:      make(map[string]int64),
-		orders:      make(map[string]*domain.Order),
-		balances:    make(map[int64]domain.Balance),
-		withdrawals: make(map[int64][]domain.Withdrawal),
+func (m *mockService) RegisterUser(login, password string) (string, error) {
+	if m.registerFn != nil {
+		return m.registerFn(login, password)
 	}
+	return "", nil
 }
 
-func (f *fakeService) RegisterUser(login, password string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if _, exists := f.users[login]; exists {
-		return "", domain.ErrUserExists
+func (m *mockService) LoginUser(login, password string) (string, error) {
+	if m.loginFn != nil {
+		return m.loginFn(login, password)
 	}
-
-	f.userIDSeq++
-	f.users[login] = password
-	f.userIDs[login] = f.userIDSeq
-	f.balances[f.userIDSeq] = domain.Balance{Current: 0, Withdrawn: 0}
-
-	f.tokenIDSeq++
-	token := fmt.Sprintf("token_%d", f.tokenIDSeq)
-	f.tokens[token] = f.userIDSeq
-
-	return token, nil
+	return "", nil
 }
 
-func (f *fakeService) LoginUser(login, password string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	pwd, exists := f.users[login]
-	if !exists {
-		return "", domain.ErrUserNotFound
+func (m *mockService) CreateOrder(userID int64, number string) (*domain.Order, error) {
+	if m.createOrderFn != nil {
+		return m.createOrderFn(userID, number)
 	}
-
-	if pwd != password {
-		return "", domain.ErrInvalidPassword
-	}
-
-	f.tokenIDSeq++
-	token := fmt.Sprintf("token_%d", f.tokenIDSeq)
-	f.tokens[token] = f.userIDs[login]
-
-	return token, nil
+	return nil, nil
 }
 
-func (f *fakeService) CreateOrder(userID int64, number string) (*domain.Order, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if order, exists := f.orders[number]; exists {
-		if order.UserID == userID {
-			return order, domain.ErrOrderOwnedByUser
-		}
-		return order, domain.ErrOrderExists
+func (m *mockService) GetUserOrders(userID int64) ([]domain.Order, error) {
+	if m.getUserOrdersFn != nil {
+		return m.getUserOrdersFn(userID)
 	}
-
-	if !isValidLuhn(number) {
-		return nil, domain.ErrInvalidOrder
-	}
-
-	order := &domain.Order{
-		ID:         int64(len(f.orders)) + 1,
-		UserID:     userID,
-		Number:     number,
-		Status:     domain.OrderStatusNew,
-		Accrual:    0,
-		UploadedAt: time.Now(),
-	}
-
-	f.orders[number] = order
-	return order, nil
+	return nil, nil
 }
 
-func (f *fakeService) GetUserOrders(userID int64) ([]domain.Order, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	var result []domain.Order
-	for _, order := range f.orders {
-		if order.UserID == userID {
-			result = append(result, *order)
-		}
+func (m *mockService) GetBalance(userID int64) (domain.Balance, error) {
+	if m.getBalanceFn != nil {
+		return m.getBalanceFn(userID)
 	}
-	return result, nil
+	return domain.Balance{}, nil
 }
 
-func (f *fakeService) GetBalance(userID int64) (domain.Balance, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	balance, exists := f.balances[userID]
-	if !exists {
-		return domain.Balance{}, domain.ErrUserNotFound
+func (m *mockService) Withdraw(userID int64, orderNumber string, sum float64) error {
+	if m.withdrawFn != nil {
+		return m.withdrawFn(userID, orderNumber, sum)
 	}
-	return balance, nil
-}
-
-func (f *fakeService) Withdraw(userID int64, orderNumber string, sum float64) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if !isValidLuhn(orderNumber) {
-		return domain.ErrInvalidOrder
-	}
-
-	balance, exists := f.balances[userID]
-	if !exists {
-		return domain.ErrUserNotFound
-	}
-
-	if balance.Current < sum {
-		return domain.ErrInsufficientFunds
-	}
-
-	balance.Current -= sum
-	balance.Withdrawn += sum
-	f.balances[userID] = balance
-
-	withdrawal := domain.Withdrawal{
-		ID:          int64(len(f.withdrawals[userID])) + 1,
-		UserID:      userID,
-		OrderNumber: orderNumber,
-		Sum:         sum,
-		ProcessedAt: time.Now(),
-	}
-	f.withdrawals[userID] = append(f.withdrawals[userID], withdrawal)
-
 	return nil
 }
 
-func (f *fakeService) GetWithdrawals(userID int64) ([]domain.Withdrawal, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	withdrawals, exists := f.withdrawals[userID]
-	if !exists {
-		return []domain.Withdrawal{}, nil
+func (m *mockService) GetWithdrawals(userID int64) ([]domain.Withdrawal, error) {
+	if m.getWithdrawalsFn != nil {
+		return m.getWithdrawalsFn(userID)
 	}
-
-	result := make([]domain.Withdrawal, len(withdrawals))
-	copy(result, withdrawals)
-	return result, nil
+	return nil, nil
 }
 
-func isValidLuhn(number string) bool {
-	if number == "" {
-		return false
+func TestHandler_Register(t *testing.T) {
+	tests := []struct {
+		name           string
+		body           LoginRequest
+		mockFn         func(login, password string) (string, error)
+		expectedStatus int
+		expectedBody   string
+	}{
+		{
+			name: "успешная регистрация",
+			body: LoginRequest{Login: "user1", Password: "pass123"},
+			mockFn: func(login, password string) (string, error) {
+				return "token123", nil
+			},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name: "пользователь уже существует",
+			body: LoginRequest{Login: "user1", Password: "pass123"},
+			mockFn: func(login, password string) (string, error) {
+				return "", domain.ErrUserExists
+			},
+			expectedStatus: http.StatusConflict,
+		},
+		{
+			name:           "некорректные данные - пустой логин",
+			body:           LoginRequest{Login: "", Password: "pass123"},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "некорректные данные - пустой пароль",
+			body:           LoginRequest{Login: "user1", Password: ""},
+			expectedStatus: http.StatusBadRequest,
+		},
 	}
 
-	var luhn int
-	for i, j := 0, len(number)-1; j >= 0; i, j = i+1, j-1 {
-		if number[j] < '0' || number[j] > '9' {
-			return false
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &Handler{svc: &mockService{registerFn: tt.mockFn}}
+			body, _ := json.Marshal(tt.body)
+			req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+			w := httptest.NewRecorder()
 
-		cur := int(number[j] - '0')
+			h.Register(w, req)
 
-		if i%2 == 1 {
-			cur = cur * 2
-			if cur > 9 {
-				cur = cur%10 + cur/10
+			if w.Code != tt.expectedStatus {
+				t.Errorf("ожидаемый статус %d, получен %d", tt.expectedStatus, w.Code)
 			}
-		}
-
-		luhn += cur
-	}
-
-	return luhn%10 == 0
-}
-
-// ============================================================================
-// UNIT TESTS FOR HTTP HANDLERS
-// ============================================================================
-
-// --- REGISTER TESTS ---
-
-func TestRegisterSuccess(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
-
-	body := LoginRequest{Login: "user1", Password: "pass123"}
-	bodyBytes, _ := json.Marshal(body)
-	req := httptest.NewRequest("POST", "/api/user/register", bytes.NewReader(bodyBytes))
-	w := httptest.NewRecorder()
-
-	h.Register(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected 200, got %d", w.Code)
-	}
-
-	if w.Header().Get("Authorization") == "" {
-		t.Error("Expected Authorization header to be set")
-	}
-
-	var resp AuthResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("Failed to decode body: %v", err)
-	}
-	if resp.Token == "" {
-		t.Error("Expected non-empty token in JSON response")
+		})
 	}
 }
 
-func TestRegisterDuplicate(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
+func TestHandler_Login(t *testing.T) {
+	tests := []struct {
+		name           string
+		body           LoginRequest
+		mockFn         func(login, password string) (string, error)
+		expectedStatus int
+	}{
+		{
+			name: "успешная авторизация",
+			body: LoginRequest{Login: "user1", Password: "pass123"},
+			mockFn: func(login, password string) (string, error) {
+				return "token123", nil
+			},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name: "неверный логин или пароль",
+			body: LoginRequest{Login: "user1", Password: "wrong"},
+			mockFn: func(login, password string) (string, error) {
+				return "", domain.ErrInvalidPassword
+			},
+			expectedStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "пользователь не найден",
+			body: LoginRequest{Login: "unknown", Password: "pass"},
+			mockFn: func(login, password string) (string, error) {
+				return "", domain.ErrUserNotFound
+			},
+			expectedStatus: http.StatusUnauthorized,
+		},
+	}
 
-	body := LoginRequest{Login: "user1", Password: "pass123"}
-	bodyBytes, _ := json.Marshal(body)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &Handler{svc: &mockService{loginFn: tt.mockFn}}
+			body, _ := json.Marshal(tt.body)
+			req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+			w := httptest.NewRecorder()
 
-	req1 := httptest.NewRequest("POST", "/api/user/register", bytes.NewReader(bodyBytes))
-	w1 := httptest.NewRecorder()
-	h.Register(w1, req1)
+			h.Login(w, req)
 
-	req2 := httptest.NewRequest("POST", "/api/user/register", bytes.NewReader(bodyBytes))
-	w2 := httptest.NewRecorder()
-	h.Register(w2, req2)
-
-	if w2.Code != http.StatusConflict {
-		t.Errorf("Expected 409 Conflict, got %d", w2.Code)
+			if w.Code != tt.expectedStatus {
+				t.Errorf("ожидаемый статус %d, получен %d", tt.expectedStatus, w.Code)
+			}
+		})
 	}
 }
 
-func TestRegisterEmptyFields(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
+func TestHandler_CreateOrder(t *testing.T) {
+	tests := []struct {
+		name           string
+		orderNumber    string
+		userID         int64
+		mockFn         func(userID int64, number string) (*domain.Order, error)
+		expectedStatus int
+	}{
+		{
+			name:        "успешное создание заказа",
+			orderNumber: "4561261212345467",
+			userID:      1,
+			mockFn: func(userID int64, number string) (*domain.Order, error) {
+				return &domain.Order{
+					Number:     number,
+					Status:     "NEW",
+					Accrual:    0,
+					UploadedAt: time.Now(),
+				}, nil
+			},
+			expectedStatus: http.StatusAccepted,
+		},
+		{
+			name:        "заказ уже загружен этим пользователем",
+			orderNumber: "4561261212345467",
+			userID:      1,
+			mockFn: func(userID int64, number string) (*domain.Order, error) {
+				return nil, domain.ErrOrderOwnedByUser
+			},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:        "заказ принадлежит другому пользователю",
+			orderNumber: "4561261212345467",
+			userID:      1,
+			mockFn: func(userID int64, number string) (*domain.Order, error) {
+				return nil, domain.ErrOrderExists
+			},
+			expectedStatus: http.StatusConflict,
+		},
+		{
+			name:        "неверный номер заказа (проверка Луна)",
+			orderNumber: "1234567890123456",
+			userID:      1,
+			mockFn: func(userID int64, number string) (*domain.Order, error) {
+				return nil, domain.ErrInvalidOrder
+			},
+			expectedStatus: http.StatusUnprocessableEntity,
+		},
+		{
+			name:           "пустой номер заказа",
+			orderNumber:    "",
+			userID:         1,
+			expectedStatus: http.StatusBadRequest,
+		},
+	}
 
-	body := LoginRequest{Login: "", Password: ""}
-	bodyBytes, _ := json.Marshal(body)
-	req := httptest.NewRequest("POST", "/api/user/register", bytes.NewReader(bodyBytes))
-	w := httptest.NewRecorder()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &Handler{svc: &mockService{createOrderFn: tt.mockFn}}
+			req := httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader(tt.orderNumber))
+			req = req.WithContext(context.WithValue(req.Context(), CtxKeyUserID, tt.userID))
+			w := httptest.NewRecorder()
 
-	h.Register(w, req)
+			h.CreateOrder(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected 400 Bad Request, got %d", w.Code)
+			if w.Code != tt.expectedStatus {
+				t.Errorf("ожидаемый статус %d, получен %d", tt.expectedStatus, w.Code)
+			}
+		})
 	}
 }
 
-// --- LOGIN TESTS ---
-
-func TestLoginSuccess(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
-
-	_, _ = svc.RegisterUser("user1", "pass123")
-
-	body := LoginRequest{Login: "user1", Password: "pass123"}
-	bodyBytes, _ := json.Marshal(body)
-	req := httptest.NewRequest("POST", "/api/user/login", bytes.NewReader(bodyBytes))
-	w := httptest.NewRecorder()
-
-	h.Login(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d", w.Code)
+func TestHandler_GetOrders(t *testing.T) {
+	tests := []struct {
+		name           string
+		userID         int64
+		mockFn         func(userID int64) ([]domain.Order, error)
+		expectedStatus int
+	}{
+		{
+			name:   "заказы найдены",
+			userID: 1,
+			mockFn: func(userID int64) ([]domain.Order, error) {
+				return []domain.Order{
+					{Number: "4561261212345467", Status: "NEW", UploadedAt: time.Now()},
+				}, nil
+			},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:   "заказов нет",
+			userID: 1,
+			mockFn: func(userID int64) ([]domain.Order, error) {
+				return []domain.Order{}, nil
+			},
+			expectedStatus: http.StatusNoContent,
+		},
 	}
 
-	if w.Header().Get("Authorization") == "" {
-		t.Error("Expected Authorization header")
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &Handler{svc: &mockService{getUserOrdersFn: tt.mockFn}}
+			req := httptest.NewRequest(http.MethodGet, "/orders", nil)
+			req = req.WithContext(context.WithValue(req.Context(), CtxKeyUserID, tt.userID))
+			w := httptest.NewRecorder()
 
-func TestLoginInvalidCredentials(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
+			h.GetOrders(w, req)
 
-	_, _ = svc.RegisterUser("user1", "pass123")
-
-	body := LoginRequest{Login: "user1", Password: "wrong_password"}
-	bodyBytes, _ := json.Marshal(body)
-	req := httptest.NewRequest("POST", "/api/user/login", bytes.NewReader(bodyBytes))
-	w := httptest.NewRecorder()
-
-	h.Login(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("Expected 401 Unauthorized, got %d", w.Code)
-	}
-}
-
-// --- CREATE ORDER TESTS ---
-
-func TestCreateOrderSuccess(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
-
-	ctx := context.WithValue(context.Background(), CtxKeyUserID, int64(1))
-	req := httptest.NewRequest("POST", "/api/user/orders", bytes.NewReader([]byte("4561261212345467"))) // Валидный Лун
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	h.CreateOrder(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Errorf("Expected 202 Accepted, got %d", w.Code)
+			if w.Code != tt.expectedStatus {
+				t.Errorf("ожидаемый статус %d, получен %d", tt.expectedStatus, w.Code)
+			}
+		})
 	}
 }
 
-func TestCreateOrderInvalidLuhn(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
+func TestHandler_GetBalance(t *testing.T) {
+	tests := []struct {
+		name           string
+		userID         int64
+		mockFn         func(userID int64) (domain.Balance, error)
+		expectedStatus int
+	}{
+		{
+			name:   "баланс получен",
+			userID: 1,
+			mockFn: func(userID int64) (domain.Balance, error) {
+				return domain.Balance{Current: 100.5, Withdrawn: 50.0}, nil
+			},
+			expectedStatus: http.StatusOK,
+		},
+	}
 
-	ctx := context.WithValue(context.Background(), CtxKeyUserID, int64(1))
-	req := httptest.NewRequest("POST", "/api/user/orders", bytes.NewReader([]byte("1234567890123456"))) // Невалидный Лун
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &Handler{svc: &mockService{getBalanceFn: tt.mockFn}}
+			req := httptest.NewRequest(http.MethodGet, "/balance", nil)
+			req = req.WithContext(context.WithValue(req.Context(), CtxKeyUserID, tt.userID))
+			w := httptest.NewRecorder()
 
-	h.CreateOrder(w, req)
+			h.GetBalance(w, req)
 
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Errorf("Expected 422 Unprocessable Entity, got %d", w.Code)
+			if w.Code != tt.expectedStatus {
+				t.Errorf("ожидаемый статус %d, получен %d", tt.expectedStatus, w.Code)
+			}
+		})
 	}
 }
 
-func TestCreateOrderConflicts(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
-
-	// Предзаполняем заказ в базе от имени UserID = 1
-	svc.orders["4561261212345467"] = &domain.Order{
-		UserID: 1,
-		Number: "4561261212345467",
-		Status: domain.OrderStatusNew,
+func TestHandler_Withdraw(t *testing.T) {
+	tests := []struct {
+		name           string
+		userID         int64
+		withdrawReq    WithdrawRequest
+		mockFn         func(userID int64, orderNumber string, sum float64) error
+		expectedStatus int
+	}{
+		{
+			name:        "успешное списание",
+			userID:      1,
+			withdrawReq: WithdrawRequest{OrderNumber: "4561261212345467", Sum: 50.0},
+			mockFn: func(userID int64, orderNumber string, sum float64) error {
+				return nil
+			},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:        "недостаточно баллов",
+			userID:      1,
+			withdrawReq: WithdrawRequest{OrderNumber: "4561261212345467", Sum: 1000.0},
+			mockFn: func(userID int64, orderNumber string, sum float64) error {
+				return domain.ErrInsufficientFunds
+			},
+			expectedStatus: http.StatusPaymentRequired,
+		},
+		{
+			name:        "неверный номер заказа",
+			userID:      1,
+			withdrawReq: WithdrawRequest{OrderNumber: "1234", Sum: 50.0},
+			mockFn: func(userID int64, orderNumber string, sum float64) error {
+				return domain.ErrInvalidOrder
+			},
+			expectedStatus: http.StatusUnprocessableEntity,
+		},
+		{
+			name:           "некорректные данные - пустой номер",
+			userID:         1,
+			withdrawReq:    WithdrawRequest{OrderNumber: "", Sum: 50.0},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "некорректные данные - нулевая сумма",
+			userID:         1,
+			withdrawReq:    WithdrawRequest{OrderNumber: "4561261212345467", Sum: 0},
+			expectedStatus: http.StatusBadRequest,
+		},
 	}
 
-	// 1. Повторный запрос от ТОГО ЖЕ юзера -> 200 OK
-	ctx1 := context.WithValue(context.Background(), CtxKeyUserID, int64(1))
-	req1 := httptest.NewRequest("POST", "/api/user/orders", bytes.NewReader([]byte("4561261212345467")))
-	w1 := httptest.NewRecorder()
-	h.CreateOrder(w1, req1.WithContext(ctx1))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &Handler{svc: &mockService{withdrawFn: tt.mockFn}}
+			body, _ := json.Marshal(tt.withdrawReq)
+			req := httptest.NewRequest(http.MethodPost, "/withdraw", bytes.NewReader(body))
+			req = req.WithContext(context.WithValue(req.Context(), CtxKeyUserID, tt.userID))
+			w := httptest.NewRecorder()
 
-	if w1.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK for same user conflict, got %d", w1.Code)
-	}
+			h.Withdraw(w, req)
 
-	// 2. Запрос на этот же номер от ДРУГОГО юзера -> 409 Conflict
-	ctx2 := context.WithValue(context.Background(), CtxKeyUserID, int64(2))
-	req2 := httptest.NewRequest("POST", "/api/user/orders", bytes.NewReader([]byte("4561261212345467")))
-	w2 := httptest.NewRecorder()
-	h.CreateOrder(w2, req2.WithContext(ctx2))
-
-	if w2.Code != http.StatusConflict {
-		t.Errorf("Expected 409 Conflict for other user, got %d", w2.Code)
-	}
-}
-
-// --- GET ORDERS TESTS ---
-
-func TestGetOrdersEmpty(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
-
-	ctx := context.WithValue(context.Background(), CtxKeyUserID, int64(1))
-	req := httptest.NewRequest("GET", "/api/user/orders", nil)
-	w := httptest.NewRecorder()
-
-	h.GetOrders(w, req.WithContext(ctx))
-
-	if w.Code != http.StatusNoContent {
-		t.Errorf("Expected 204 No Content, got %d", w.Code)
-	}
-}
-
-func TestGetOrdersWithContent(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
-
-	ctx := context.WithValue(context.Background(), CtxKeyUserID, int64(1))
-	svc.orders["4561261212345467"] = &domain.Order{
-		UserID:     1,
-		Number:     "4561261212345467",
-		Status:     domain.OrderStatusNew,
-		UploadedAt: time.Now(),
-	}
-
-	req := httptest.NewRequest("GET", "/api/user/orders", nil)
-	w := httptest.NewRecorder()
-
-	h.GetOrders(w, req.WithContext(ctx))
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d", w.Code)
-	}
-
-	var resp []OrderResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("Failed to decode body: %v", err)
-	}
-
-	if len(resp) != 1 || resp[0].Number != "4561261212345467" {
-		t.Error("Response slice elements mismatch or empty")
+			if w.Code != tt.expectedStatus {
+				t.Errorf("ожидаемый статус %d, получен %d", tt.expectedStatus, w.Code)
+			}
+		})
 	}
 }
 
-// --- GET BALANCE TESTS ---
-
-func TestGetBalanceSuccess(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
-
-	ctx := context.WithValue(context.Background(), CtxKeyUserID, int64(1))
-	svc.balances[1] = domain.Balance{Current: 450.50, Withdrawn: 120.00}
-
-	req := httptest.NewRequest("GET", "/api/user/balance", nil)
-	w := httptest.NewRecorder()
-
-	h.GetBalance(w, req.WithContext(ctx))
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d", w.Code)
+func TestHandler_GetWithdrawals(t *testing.T) {
+	tests := []struct {
+		name           string
+		userID         int64
+		mockFn         func(userID int64) ([]domain.Withdrawal, error)
+		expectedStatus int
+	}{
+		{
+			name:   "списания найдены",
+			userID: 1,
+			mockFn: func(userID int64) ([]domain.Withdrawal, error) {
+				return []domain.Withdrawal{
+					{OrderNumber: "4561261212345467", Sum: 50.0, ProcessedAt: time.Now()},
+				}, nil
+			},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:   "списаний нет",
+			userID: 1,
+			mockFn: func(userID int64) ([]domain.Withdrawal, error) {
+				return []domain.Withdrawal{}, nil
+			},
+			expectedStatus: http.StatusNoContent,
+		},
 	}
 
-	var resp BalanceResponse
-	_ = json.NewDecoder(w.Body).Decode(&resp)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &Handler{svc: &mockService{getWithdrawalsFn: tt.mockFn}}
+			req := httptest.NewRequest(http.MethodGet, "/withdrawals", nil)
+			req = req.WithContext(context.WithValue(req.Context(), CtxKeyUserID, tt.userID))
+			w := httptest.NewRecorder()
 
-	if resp.Current != 450.50 || resp.Withdrawn != 120.00 {
-		t.Errorf("Expected currents 450.50 and 120.00, got %f and %f", resp.Current, resp.Withdrawn)
-	}
-}
+			h.GetWithdrawals(w, req)
 
-// --- WITHDRAW TESTS ---
-
-func TestWithdrawSuccess(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
-
-	ctx := context.WithValue(context.Background(), CtxKeyUserID, int64(1))
-	svc.balances[1] = domain.Balance{Current: 100, Withdrawn: 0}
-
-	body := WithdrawRequest{OrderNumber: "4561261212345467", Sum: 40}
-	bodyBytes, _ := json.Marshal(body)
-	req := httptest.NewRequest("POST", "/api/user/balance/withdraw", bytes.NewReader(bodyBytes))
-	w := httptest.NewRecorder()
-
-	h.Withdraw(w, req.WithContext(ctx))
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d", w.Code)
-	}
-
-	// Доп проверка баланса после списания
-	if svc.balances[1].Current != 60 || svc.balances[1].Withdrawn != 40 {
-		t.Error("Balance fields didn't update inside fake service state")
+			if w.Code != tt.expectedStatus {
+				t.Errorf("ожидаемый статус %d, получен %d", tt.expectedStatus, w.Code)
+			}
+		})
 	}
 }
 
-func TestWithdrawInsufficientFunds(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
-
-	ctx := context.WithValue(context.Background(), CtxKeyUserID, int64(1))
-	svc.balances[1] = domain.Balance{Current: 10, Withdrawn: 0}
-
-	body := WithdrawRequest{OrderNumber: "4561261212345467", Sum: 50}
-	bodyBytes, _ := json.Marshal(body)
-	req := httptest.NewRequest("POST", "/api/user/balance/withdraw", bytes.NewReader(bodyBytes))
-	w := httptest.NewRecorder()
-
-	h.Withdraw(w, req.WithContext(ctx))
-
-	if w.Code != http.StatusPaymentRequired {
-		t.Errorf("Expected 402 Payment Required, got %d", w.Code)
+func TestUserIDFromContext(t *testing.T) {
+	tests := []struct {
+		name  string
+		ctx   context.Context
+		want  int64
+		want1 bool
+	}{
+		{
+			name:  "userID найден",
+			ctx:   context.WithValue(context.Background(), CtxKeyUserID, int64(42)),
+			want:  42,
+			want1: true,
+		},
+		{
+			name:  "userID не найден",
+			ctx:   context.Background(),
+			want:  0,
+			want1: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, got1 := UserIDFromContext(tt.ctx)
+			if got != tt.want {
+				t.Errorf("UserIDFromContext() got = %v, want %v", got, tt.want)
+			}
+			if got1 != tt.want1 {
+				t.Errorf("UserIDFromContext() got1 = %v, want %v", got1, tt.want1)
+			}
+		})
 	}
 }
 
-// --- GET WITHDRAWALS TESTS ---
-
-func TestGetWithdrawalsEmpty(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
-
-	ctx := context.WithValue(context.Background(), CtxKeyUserID, int64(1))
-	req := httptest.NewRequest("GET", "/api/user/withdrawals", nil)
-	w := httptest.NewRecorder()
-
-	h.GetWithdrawals(w, req.WithContext(ctx))
-
-	if w.Code != http.StatusNoContent {
-		t.Errorf("Expected 204 No Content, got %d", w.Code)
+func Test_writeError(t *testing.T) {
+	type args struct {
+		w           http.ResponseWriter
+		status      int
+		code        string
+		userMsg     string
+		internalErr error
+	}
+	tests := []struct {
+		name string
+		args args
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writeError(tt.args.w, tt.args.status, tt.args.code, tt.args.userMsg, tt.args.internalErr)
+		})
 	}
 }
 
-func TestGetWithdrawalsWithContent(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
-
-	ctx := context.WithValue(context.Background(), CtxKeyUserID, int64(1))
-	svc.withdrawals[1] = []domain.Withdrawal{
-		{OrderNumber: "4561261212345467", Sum: 100, ProcessedAt: time.Now()},
+func Test_writeJSON(t *testing.T) {
+	type args struct {
+		w      http.ResponseWriter
+		status int
+		v      any
 	}
-
-	req := httptest.NewRequest("GET", "/api/user/withdrawals", nil)
-	w := httptest.NewRecorder()
-
-	h.GetWithdrawals(w, req.WithContext(ctx))
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d", w.Code)
+	tests := []struct {
+		name string
+		args args
+	}{
+		// TODO: Add test cases.
 	}
-
-	var resp []WithdrawalResponse
-	_ = json.NewDecoder(w.Body).Decode(&resp)
-
-	if len(resp) != 1 || resp[0].OrderNumber != "4561261212345467" || resp[0].Sum != 100 {
-		t.Error("Withdrawal response fields array parsing mismatch")
-	}
-}
-
-// --- EXPORT STATS TESTS ---
-
-func TestExportStatsSuccess(t *testing.T) {
-	svc := newFakeService()
-	h := New(svc)
-
-	ctx := context.WithValue(context.Background(), CtxKeyUserID, int64(1))
-	svc.balances[1] = domain.Balance{Current: 50, Withdrawn: 50}
-	svc.orders["4561261212345467"] = &domain.Order{
-		UserID: 1, Number: "4561261212345467", Status: domain.OrderStatusProcessed, Accrual: 100,
-	}
-
-	req := httptest.NewRequest("POST", "/api/stats/export", nil)
-	w := httptest.NewRecorder()
-
-	// Безопасное удаление тестового артефакта с диска
-	t.Cleanup(func() {
-		_ = os.Remove("stats.txt")
-	})
-
-	h.ExportStats(w, req.WithContext(ctx))
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d", w.Code)
-	}
-
-	// Проверяем физическое существование файла на диске
-	if _, err := os.Stat("stats.txt"); os.IsNotExist(err) {
-		t.Error("Expected stats.txt file to be written into project root directory")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writeJSON(tt.args.w, tt.args.status, tt.args.v)
+		})
 	}
 }

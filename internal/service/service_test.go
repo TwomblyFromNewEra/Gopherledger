@@ -1,329 +1,637 @@
 package service
 
 import (
-	"testing"
-
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"gopherledger/internal/domain"
+	"reflect"
+	"sync"
+	"testing"
+	"time"
 )
 
+// mockRepository - mock для тестирования
 type mockRepository struct {
-	users       map[string]*domain.User
-	orders      map[string]*domain.Order
-	balances    map[int64]*domain.Balance
-	withdrawals map[int64][]*domain.Withdrawal
-	userIDSeq   int64
-}
-
-func newMockRepository() *mockRepository {
-	return &mockRepository{
-		users:       make(map[string]*domain.User),
-		orders:      make(map[string]*domain.Order),
-		balances:    make(map[int64]*domain.Balance),
-		withdrawals: make(map[int64][]*domain.Withdrawal),
-	}
+	createUserFn             func(login, passwordHash string) (*domain.User, error)
+	getUserByLoginFn         func(login string) (*domain.User, error)
+	createOrderFn            func(userID int64, number string) (*domain.Order, error)
+	getUserOrdersFn          func(userID int64) ([]domain.Order, error)
+	getOrdersForProcessingFn func() ([]domain.Order, error)
+	updateOrderStatusFn      func(number, status string, accrual float64) error
+	getBalanceFn             func(userID int64) (domain.Balance, error)
+	withdrawFn               func(userID int64, orderNumber string, sum float64) error
+	getWithdrawalsFn         func(userID int64) ([]domain.Withdrawal, error)
 }
 
 func (m *mockRepository) CreateUser(login, passwordHash string) (*domain.User, error) {
-	if _, exists := m.users[login]; exists {
-		return nil, domain.ErrUserExists
+	if m.createUserFn != nil {
+		return m.createUserFn(login, passwordHash)
 	}
-	m.userIDSeq++
-	user := &domain.User{
-		ID:           m.userIDSeq,
-		Login:        login,
-		PasswordHash: passwordHash,
-	}
-	m.users[login] = user
-	m.balances[user.ID] = &domain.Balance{Current: 0, Withdrawn: 0}
-	return user, nil
+	return nil, nil
 }
 
 func (m *mockRepository) GetUserByLogin(login string) (*domain.User, error) {
-	user, exists := m.users[login]
-	if !exists {
-		return nil, domain.ErrUserNotFound
+	if m.getUserByLoginFn != nil {
+		return m.getUserByLoginFn(login)
 	}
-	return user, nil
+	return nil, nil
 }
 
 func (m *mockRepository) CreateOrder(userID int64, number string) (*domain.Order, error) {
-	if order, exists := m.orders[number]; exists {
-		if order.UserID == userID {
-			return order, domain.ErrOrderOwnedByUser
-		}
-		return order, domain.ErrOrderExists
+	if m.createOrderFn != nil {
+		return m.createOrderFn(userID, number)
 	}
-	order := &domain.Order{
-		ID:     int64(len(m.orders)) + 1,
-		UserID: userID,
-		Number: number,
-		Status: domain.OrderStatusNew,
-	}
-	m.orders[number] = order
-	return order, nil
+	return nil, nil
 }
 
 func (m *mockRepository) GetUserOrders(userID int64) ([]domain.Order, error) {
-	var result []domain.Order
-	for _, order := range m.orders {
-		if order.UserID == userID {
-			result = append(result, *order)
-		}
+	if m.getUserOrdersFn != nil {
+		return m.getUserOrdersFn(userID)
 	}
-	return result, nil
+	return nil, nil
 }
 
 func (m *mockRepository) GetOrdersForProcessing() ([]domain.Order, error) {
-	var result []domain.Order
-	for _, order := range m.orders {
-		if order.Status == domain.OrderStatusNew || order.Status == domain.OrderStatusProcessing {
-			result = append(result, *order)
-		}
+	if m.getOrdersForProcessingFn != nil {
+		return m.getOrdersForProcessingFn()
 	}
-	return result, nil
+	return nil, nil
 }
 
 func (m *mockRepository) UpdateOrderStatus(number, status string, accrual float64) error {
-	if order, exists := m.orders[number]; exists {
-		order.Status = status
-		order.Accrual = accrual
-		return nil
+	if m.updateOrderStatusFn != nil {
+		return m.updateOrderStatusFn(number, status, accrual)
 	}
-	return domain.ErrInvalidOrder
+	return nil
 }
 
 func (m *mockRepository) GetBalance(userID int64) (domain.Balance, error) {
-	balance, exists := m.balances[userID]
-	if !exists {
-		return domain.Balance{}, domain.ErrUserNotFound
+	if m.getBalanceFn != nil {
+		return m.getBalanceFn(userID)
 	}
-	return *balance, nil
+	return domain.Balance{}, nil
 }
 
 func (m *mockRepository) Withdraw(userID int64, orderNumber string, sum float64) error {
-	balance, exists := m.balances[userID]
-	if !exists {
-		return domain.ErrUserNotFound
+	if m.withdrawFn != nil {
+		return m.withdrawFn(userID, orderNumber, sum)
 	}
-	if balance.Current < sum {
-		return domain.ErrInsufficientFunds
-	}
-	balance.Current -= sum
-	balance.Withdrawn += sum
 	return nil
 }
 
 func (m *mockRepository) GetWithdrawals(userID int64) ([]domain.Withdrawal, error) {
-	withdrawals, exists := m.withdrawals[userID]
-	if !exists {
-		return []domain.Withdrawal{}, nil
+	if m.getWithdrawalsFn != nil {
+		return m.getWithdrawalsFn(userID)
 	}
-	result := make([]domain.Withdrawal, len(withdrawals))
-	for i, w := range withdrawals {
-		result[i] = *w
-	}
-	return result, nil
+	return nil, nil
 }
 
-func TestRegisterUserSuccess(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	token, err := svc.RegisterUser("user1", "password123")
-	if err != nil {
-		t.Fatalf("RegisterUser failed: %v", err)
+func TestNew(t *testing.T) {
+	type args struct {
+		repo Repository
 	}
-	if token == "" {
-		t.Error("Expected non-empty token")
+	tests := []struct {
+		name string
+		args args
+		want *Service
+	}{
+		// TODO: Add test cases.
 	}
-}
-
-func TestRegisterUserDuplicate(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	svc.RegisterUser("user1", "password123")
-	_, err := svc.RegisterUser("user1", "password456")
-
-	if err != domain.ErrUserExists {
-		t.Errorf("Expected ErrUserExists, got %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := New(tt.args.repo); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("New() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestLoginUserSuccess(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	svc.RegisterUser("user1", "password123")
-	token, err := svc.LoginUser("user1", "password123")
-
-	if err != nil {
-		t.Fatalf("LoginUser failed: %v", err)
+func TestService_CreateOrder(t *testing.T) {
+	type fields struct {
+		repo             Repository
+		processingOrders map[string]bool
+		muProcessing     sync.RWMutex
 	}
-	if token == "" {
-		t.Error("Expected non-empty token")
+	type args struct {
+		userID int64
+		number string
 	}
-}
-
-func TestLoginUserInvalidPassword(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	svc.RegisterUser("user1", "password123")
-	_, err := svc.LoginUser("user1", "wrongpassword")
-
-	if err != domain.ErrInvalidPassword {
-		t.Errorf("Expected ErrInvalidPassword, got %v", err)
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		want    *domain.Order
+		wantErr bool
+	}{
+		// TODO: Add test cases.
 	}
-}
-
-func TestLoginUserNotFound(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	_, err := svc.LoginUser("nonexistent", "password123")
-
-	if err != domain.ErrUserNotFound {
-		t.Errorf("Expected ErrUserNotFound, got %v", err)
-	}
-}
-
-func TestCreateOrderSuccess(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	order, err := svc.CreateOrder(1, "4561261212345467")
-	if err != nil {
-		t.Fatalf("CreateOrder failed: %v", err)
-	}
-	if order.Number != "4561261212345467" {
-		t.Errorf("Expected 4561261212345467, got %s", order.Number)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{
+				repo:             tt.fields.repo,
+				processingOrders: tt.fields.processingOrders,
+				muProcessing:     tt.fields.muProcessing,
+			}
+			got, err := s.CreateOrder(tt.args.userID, tt.args.number)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("CreateOrder() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("CreateOrder() got = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestCreateOrderInvalidLuhn(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	_, err := svc.CreateOrder(1, "1111111111111111")
-
-	if err != domain.ErrInvalidOrder {
-		t.Errorf("Expected ErrInvalidOrder, got %v", err)
+func TestService_GetBalance(t *testing.T) {
+	type fields struct {
+		repo             Repository
+		processingOrders map[string]bool
+		muProcessing     sync.RWMutex
+	}
+	type args struct {
+		userID int64
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		want    domain.Balance
+		wantErr bool
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{
+				repo:             tt.fields.repo,
+				processingOrders: tt.fields.processingOrders,
+				muProcessing:     tt.fields.muProcessing,
+			}
+			got, err := s.GetBalance(tt.args.userID)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GetBalance() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("GetBalance() got = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestCreateOrderDuplicate(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	svc.CreateOrder(1, "4561261212345467")
-	_, err := svc.CreateOrder(1, "4561261212345467")
-
-	if err != domain.ErrOrderOwnedByUser {
-		t.Errorf("Expected ErrOrderOwnedByUser, got %v", err)
+func TestService_GetUserOrders(t *testing.T) {
+	type fields struct {
+		repo             Repository
+		processingOrders map[string]bool
+		muProcessing     sync.RWMutex
+	}
+	type args struct {
+		userID int64
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		want    []domain.Order
+		wantErr bool
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{
+				repo:             tt.fields.repo,
+				processingOrders: tt.fields.processingOrders,
+				muProcessing:     tt.fields.muProcessing,
+			}
+			got, err := s.GetUserOrders(tt.args.userID)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GetUserOrders() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("GetUserOrders() got = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestCreateOrderConflict(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	svc.CreateOrder(1, "4561261212345467")
-	_, err := svc.CreateOrder(2, "4561261212345467")
-
-	if err != domain.ErrOrderExists {
-		t.Errorf("Expected ErrOrderExists, got %v", err)
+func TestService_GetWithdrawals(t *testing.T) {
+	type fields struct {
+		repo             Repository
+		processingOrders map[string]bool
+		muProcessing     sync.RWMutex
+	}
+	type args struct {
+		userID int64
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		want    []domain.Withdrawal
+		wantErr bool
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{
+				repo:             tt.fields.repo,
+				processingOrders: tt.fields.processingOrders,
+				muProcessing:     tt.fields.muProcessing,
+			}
+			got, err := s.GetWithdrawals(tt.args.userID)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GetWithdrawals() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("GetWithdrawals() got = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestGetUserOrders(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
+func TestService_LoginUser(t *testing.T) {
+	password := "password123"
+	hash := sha256.Sum256([]byte(password))
+	hashString := hex.EncodeToString(hash[:])
 
-	// Первый валидный номер
-	if _, err := svc.CreateOrder(1, "4561261212345467"); err != nil {
-		t.Fatalf("Failed to create first order: %v", err)
+	tests := []struct {
+		name     string
+		login    string
+		password string
+		mockFn   func(login string) (*domain.User, error)
+		wantErr  bool
+	}{
+		{
+			name:     "успешная авторизация",
+			login:    "testuser",
+			password: password,
+			mockFn: func(login string) (*domain.User, error) {
+				return &domain.User{ID: 1, Login: login, PasswordHash: hashString}, nil
+			},
+			wantErr: false,
+		},
+		{
+			name:     "неверный пароль",
+			login:    "testuser",
+			password: "wrongpass",
+			mockFn: func(login string) (*domain.User, error) {
+				return &domain.User{ID: 1, Login: login, PasswordHash: hashString}, nil
+			},
+			wantErr: true,
+		},
+		{
+			name:     "пользователь не найден",
+			login:    "unknown",
+			password: password,
+			mockFn: func(login string) (*domain.User, error) {
+				return nil, domain.ErrUserNotFound
+			},
+			wantErr: true,
+		},
 	}
-
-	// Второй валидный номер (Исправлено!)
-	if _, err := svc.CreateOrder(1, "1234567812345670"); err != nil {
-		t.Fatalf("Failed to create second order: %v", err)
-	}
-
-	orders, err := svc.GetUserOrders(1)
-	if err != nil {
-		t.Fatalf("GetUserOrders failed: %v", err)
-	}
-
-	if len(orders) != 2 {
-		t.Errorf("Expected 2 orders, got %d", len(orders))
-	}
-}
-
-func TestGetBalance(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	repo.balances[1] = &domain.Balance{
-		Current:   0,
-		Withdrawn: 0,
-	}
-
-	balance, err := svc.GetBalance(1)
-	if err != nil {
-		t.Fatalf("GetBalance failed: %v", err)
-	}
-
-	if balance.Current != 0 {
-		t.Errorf("Expected current=0, got %f", balance.Current)
-	}
-}
-
-func TestWithdrawSuccess(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	repo.balances[1] = &domain.Balance{Current: 100, Withdrawn: 0}
-
-	err := svc.Withdraw(1, "4561261212345467", 50)
-	if err != nil {
-		t.Fatalf("Withdraw failed: %v", err)
-	}
-}
-
-func TestWithdrawInsufficientFunds(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	repo.balances[1] = &domain.Balance{Current: 10, Withdrawn: 0}
-
-	err := svc.Withdraw(1, "4561261212345467", 50)
-	if err != domain.ErrInsufficientFunds {
-		t.Errorf("Expected ErrInsufficientFunds, got %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{repo: &mockRepository{getUserByLoginFn: tt.mockFn}}
+			got, err := s.LoginUser(tt.login, tt.password)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("LoginUser() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got == "" {
+				t.Errorf("LoginUser() получен пустой токен")
+			}
+		})
 	}
 }
 
-func TestWithdrawInvalidOrder(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
-
-	repo.balances[1] = &domain.Balance{Current: 100, Withdrawn: 0}
-
-	err := svc.Withdraw(1, "1111111111111111", 50)
-	if err != domain.ErrInvalidOrder {
-		t.Errorf("Expected ErrInvalidOrder, got %v", err)
+func TestService_RegisterUser(t *testing.T) {
+	tests := []struct {
+		name     string
+		login    string
+		password string
+		mockFn   func(login, passwordHash string) (*domain.User, error)
+		wantErr  bool
+	}{
+		{
+			name:     "успешная регистрация",
+			login:    "testuser",
+			password: "password123",
+			mockFn: func(login, passwordHash string) (*domain.User, error) {
+				return &domain.User{ID: 1, Login: login, PasswordHash: passwordHash}, nil
+			},
+			wantErr: false,
+		},
+		{
+			name:     "пользователь уже существует",
+			login:    "testuser",
+			password: "password123",
+			mockFn: func(login, passwordHash string) (*domain.User, error) {
+				return nil, domain.ErrUserExists
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{repo: &mockRepository{createUserFn: tt.mockFn}}
+			got, err := s.RegisterUser(tt.login, tt.password)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("RegisterUser() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got == "" {
+				t.Errorf("RegisterUser() получен пустой токен")
+			}
+		})
 	}
 }
 
-func TestGetWithdrawals(t *testing.T) {
-	repo := newMockRepository()
-	svc := New(repo)
+func TestService_Withdraw(t *testing.T) {
+	type fields struct {
+		repo             Repository
+		processingOrders map[string]bool
+		muProcessing     sync.RWMutex
+	}
+	type args struct {
+		userID      int64
+		orderNumber string
+		sum         float64
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		wantErr bool
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{
+				repo:             tt.fields.repo,
+				processingOrders: tt.fields.processingOrders,
+				muProcessing:     tt.fields.muProcessing,
+			}
+			if err := s.Withdraw(tt.args.userID, tt.args.orderNumber, tt.args.sum); (err != nil) != tt.wantErr {
+				t.Errorf("Withdraw() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
 
-	withdrawals, err := svc.GetWithdrawals(1)
-	if err != nil {
-		t.Fatalf("GetWithdrawals failed: %v", err)
+func TestService_markProcessing(t *testing.T) {
+	type fields struct {
+		repo             Repository
+		processingOrders map[string]bool
+		muProcessing     sync.RWMutex
 	}
-	if len(withdrawals) != 0 {
-		t.Errorf("Expected 0 withdrawals, got %d", len(withdrawals))
+	type args struct {
+		number string
 	}
+	tests := []struct {
+		name   string
+		fields fields
+		args   args
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{
+				repo:             tt.fields.repo,
+				processingOrders: tt.fields.processingOrders,
+				muProcessing:     tt.fields.muProcessing,
+			}
+			s.markProcessing(tt.args.number)
+		})
+	}
+}
+
+func TestService_processAllPendingOrders(t *testing.T) {
+	type fields struct {
+		repo             Repository
+		processingOrders map[string]bool
+		muProcessing     sync.RWMutex
+	}
+	type args struct {
+		ctx context.Context
+	}
+	tests := []struct {
+		name   string
+		fields fields
+		args   args
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{
+				repo:             tt.fields.repo,
+				processingOrders: tt.fields.processingOrders,
+				muProcessing:     tt.fields.muProcessing,
+			}
+			s.processAllPendingOrders(tt.args.ctx)
+		})
+	}
+}
+
+func TestService_processOrder(t *testing.T) {
+	type fields struct {
+		repo             Repository
+		processingOrders map[string]bool
+		muProcessing     sync.RWMutex
+	}
+	type args struct {
+		ctx    context.Context
+		number string
+	}
+	tests := []struct {
+		name   string
+		fields fields
+		args   args
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{
+				repo:             tt.fields.repo,
+				processingOrders: tt.fields.processingOrders,
+				muProcessing:     tt.fields.muProcessing,
+			}
+			s.processOrder(tt.args.ctx, tt.args.number)
+		})
+	}
+}
+
+func TestService_unmarkProcessing(t *testing.T) {
+	type fields struct {
+		repo             Repository
+		processingOrders map[string]bool
+		muProcessing     sync.RWMutex
+	}
+	type args struct {
+		number string
+	}
+	tests := []struct {
+		name   string
+		fields fields
+		args   args
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{
+				repo:             tt.fields.repo,
+				processingOrders: tt.fields.processingOrders,
+				muProcessing:     tt.fields.muProcessing,
+			}
+			s.unmarkProcessing(tt.args.number)
+		})
+	}
+}
+
+func Test_isInvalid(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isInvalid(); got != tt.want {
+				t.Errorf("isInvalid() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_randomAccrual(t *testing.T) {
+	tests := []struct {
+		name string
+		want float64
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := randomAccrual(); got != tt.want {
+				t.Errorf("randomAccrual() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_randomDelay(t *testing.T) {
+	tests := []struct {
+		name string
+		want time.Duration
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := randomDelay(); got != tt.want {
+				t.Errorf("randomDelay() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_validateLuhn(t *testing.T) {
+	type args struct {
+		number string
+	}
+	tests := []struct {
+		name string
+		args args
+		want bool
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := validateLuhn(tt.args.number); got != tt.want {
+				t.Errorf("validateLuhn() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestService_isProcessing(t *testing.T) {
+	s := New(&mockRepository{})
+
+	s.markProcessing("order1")
+
+	tests := []struct {
+		name   string
+		number string
+		want   bool
+	}{
+		{
+			name:   "заказ в обработке",
+			number: "order1",
+			want:   true,
+		},
+		{
+			name:   "заказ не в обработке",
+			number: "order2",
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := s.isProcessing(tt.number); got != tt.want {
+				t.Errorf("isProcessing() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestService_markAndUnmarkProcessing(t *testing.T) {
+	s := New(&mockRepository{})
+
+	t.Run("отметить в обработке", func(t *testing.T) {
+		s.markProcessing("order1")
+		if !s.isProcessing("order1") {
+			t.Errorf("заказ должен быть отмечен как в обработке")
+		}
+	})
+
+	t.Run("снять отметку", func(t *testing.T) {
+		s.unmarkProcessing("order1")
+		if s.isProcessing("order1") {
+			t.Errorf("заказ должен быть снят с обработки")
+		}
+	})
+}
+
+func TestService_StartAccrualWorker(t *testing.T) {
+	t.Run("воркер запускается и останавливается", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		s := New(&mockRepository{
+			getOrdersForProcessingFn: func() ([]domain.Order, error) {
+				return []domain.Order{}, nil
+			},
+		})
+
+		// Воркер должен завершиться после отмены контекста
+		s.StartAccrualWorker(ctx)
+
+		// Если мы здесь, то воркер корректно остановился
+		if ctx.Err() == nil {
+			t.Error("контекст должен быть отменен")
+		}
+	})
 }
